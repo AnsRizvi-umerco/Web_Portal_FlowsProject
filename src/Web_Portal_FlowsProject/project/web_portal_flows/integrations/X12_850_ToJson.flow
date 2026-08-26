@@ -1,0 +1,753 @@
+interface project.web_portal_flows.integrations
+
+service X12_850_ToJson (
+    input {
+        String x12Input;
+    }
+    output {
+        String jsonOutput;
+    }
+)
+properties {
+    comment: "Parses an X12 4010 850 Purchase Order (ISA/GS/ST/BEG/CUR/DTM/N1x3/N3/N4/PO1+PID per line/CTT/AMT) into a JSON document with interchange/message/payload sections. Trailer segments (SE/GE/IEA) carry no fields needed downstream and are skipped.";
+}
+{
+    INVOKE pub.string:tokenize {
+        comment: "Split the EDI document into segments on the ~ segment terminator"
+        input {
+            mapSource {
+                String x12Input;
+            }
+            mapTarget {
+                String inString;
+                String delim;
+                Boolean useRegex;
+            }
+            copy x12Input -> inString;
+            set delim = "~";
+            set useRegex = "false";
+        }
+        output {
+            mapSource {
+                String[] valueList;
+            }
+            mapTarget {
+                String[] segments;
+            }
+            copy valueList -> segments;
+        }
+    }
+
+    LOOP {
+        inputArray: "/segments"
+
+        INVOKE pub.string:trim {
+            comment: "Strip leading/trailing whitespace (including soft-wrapped line breaks some EDI files use around ~) before parsing this segment"
+            input {
+                mapSource {
+                    String segments;
+                }
+                mapTarget {
+                    String inString;
+                    String `type`;
+                }
+                copy segments -> inString;
+                set `type` = "both";
+            }
+            output {
+                mapSource {
+                    String `value`;
+                }
+                mapTarget {
+                    String trimmedSegment;
+                }
+                copy `value` -> trimmedSegment;
+                drop `value`;
+            }
+        }
+
+        INVOKE pub.string:tokenize {
+            comment: "Split this segment into elements on * -- regex mode with an escaped delimiter is required or empty EDI fields between consecutive * silently collapse and shift every later index"
+            input {
+                mapSource {
+                    String trimmedSegment;
+                }
+                mapTarget {
+                    String inString;
+                    String delim;
+                    Boolean useRegex;
+                }
+                copy trimmedSegment -> inString;
+                set delim = "\\*";
+                set useRegex = "true";
+            }
+            output {
+                mapSource {
+                    String[] valueList;
+                }
+                mapTarget {
+                    String[] elems;
+                }
+                copy valueList -> elems;
+            }
+        }
+
+        MAP {
+            comment: "Identify the segment type from its first element"
+            mapSource {
+                String[] elems;
+            }
+            mapTarget {
+                String segId;
+            }
+            copy elems[0] -> segId;
+        }
+
+        SWITCH (segId) {
+            CASE "ISA" :
+                SEQUENCE {
+                    MAP {
+                        mapSource {
+                            String[] elems;
+                        }
+                        mapTarget {
+                            String senderQualifier;
+                            String rawSenderId;
+                            String receiverQualifier;
+                            String rawReceiverId;
+                            String interchangeDate;
+                            String interchangeTime;
+                            String controlVersion;
+                            String interchangeControlNo;
+                            String ackRequested;
+                            String usageIndicator;
+                        }
+                        copy elems[5] -> senderQualifier;
+                        copy elems[6] -> rawSenderId;
+                        copy elems[7] -> receiverQualifier;
+                        copy elems[8] -> rawReceiverId;
+                        copy elems[9] -> interchangeDate;
+                        copy elems[10] -> interchangeTime;
+                        copy elems[12] -> controlVersion;
+                        copy elems[13] -> interchangeControlNo;
+                        copy elems[14] -> ackRequested;
+                        copy elems[15] -> usageIndicator;
+                    }
+                    INVOKE pub.string:trim {
+                        comment: "Trim the fixed-width padding from the sender ID"
+                        input {
+                            mapSource {
+                                String rawSenderId;
+                            }
+                            mapTarget {
+                                String inString;
+                                String `type`;
+                            }
+                            copy rawSenderId -> inString;
+                            set `type` = "both";
+                        }
+                        output {
+                            mapSource {
+                                String `value`;
+                            }
+                            mapTarget {
+                                String senderId;
+                            }
+                            copy `value` -> senderId;
+                            drop `value`;
+                            drop rawSenderId;
+                        }
+                    }
+                    INVOKE pub.string:trim {
+                        comment: "Trim the fixed-width padding from the receiver ID"
+                        input {
+                            mapSource {
+                                String rawReceiverId;
+                            }
+                            mapTarget {
+                                String inString;
+                                String `type`;
+                            }
+                            copy rawReceiverId -> inString;
+                            set `type` = "both";
+                        }
+                        output {
+                            mapSource {
+                                String `value`;
+                            }
+                            mapTarget {
+                                String receiverId;
+                            }
+                            copy `value` -> receiverId;
+                            drop `value`;
+                            drop rawReceiverId;
+                        }
+                    }
+                }
+            CASE "GS" :
+                MAP {
+                    mapSource {
+                        String[] elems;
+                    }
+                    mapTarget {
+                        String functionalGroup;
+                        String groupControlNo;
+                        String gsAgency;
+                        String gsVersion;
+                    }
+                    copy elems[1] -> functionalGroup;
+                    copy elems[6] -> groupControlNo;
+                    copy elems[7] -> gsAgency;
+                    copy elems[8] -> gsVersion;
+                }
+            CASE "ST" :
+                MAP {
+                    mapSource {
+                        String[] elems;
+                    }
+                    mapTarget {
+                        String messageType;
+                        String messageReference;
+                    }
+                    copy elems[1] -> messageType;
+                    copy elems[2] -> messageReference;
+                }
+            CASE "BEG" :
+                MAP {
+                    mapSource {
+                        String[] elems;
+                    }
+                    mapTarget {
+                        String purposeCode;
+                        String orderTypeCode;
+                        String poNumber;
+                        String poDate;
+                    }
+                    copy elems[1] -> purposeCode;
+                    copy elems[2] -> orderTypeCode;
+                    copy elems[3] -> poNumber;
+                    copy elems[5] -> poDate;
+                }
+            CASE "CUR" :
+                MAP {
+                    mapSource {
+                        String[] elems;
+                    }
+                    mapTarget {
+                        String currency;
+                    }
+                    copy elems[2] -> currency;
+                }
+            CASE "DTM" :
+                MAP {
+                    mapSource {
+                        String[] elems;
+                    }
+                    mapTarget {
+                        String requestedDeliveryDate;
+                    }
+                    copy elems[2] -> requestedDeliveryDate;
+                }
+            CASE "N1" :
+                SEQUENCE {
+                    MAP {
+                        comment: "Route this N1 to buyer, vendor, or ship-to based on the entity identifier code"
+                        mapSource {
+                            String[] elems;
+                        }
+                        mapTarget {
+                            String n1Code;
+                        }
+                        copy elems[1] -> n1Code;
+                    }
+                    IF (%n1Code% == "BY") {
+                        MAP {
+                            mapSource {
+                                String[] elems;
+                            }
+                            mapTarget {
+                                String buyerName;
+                                String buyerQualifier;
+                                String buyerId;
+                            }
+                            copy elems[2] -> buyerName;
+                            copy elems[3] -> buyerQualifier;
+                            copy elems[4] -> buyerId;
+                        }
+                    }
+                    ELSEIF (%n1Code% == "VN") {
+                        MAP {
+                            mapSource {
+                                String[] elems;
+                            }
+                            mapTarget {
+                                String vendorName;
+                                String vendorQualifier;
+                                String vendorId;
+                            }
+                            copy elems[2] -> vendorName;
+                            copy elems[3] -> vendorQualifier;
+                            copy elems[4] -> vendorId;
+                        }
+                    }
+                    ELSEIF (%n1Code% == "ST") {
+                        MAP {
+                            mapSource {
+                                String[] elems;
+                            }
+                            mapTarget {
+                                String shipToName;
+                                String shipToQualifier;
+                                String shipToId;
+                            }
+                            copy elems[2] -> shipToName;
+                            copy elems[3] -> shipToQualifier;
+                            copy elems[4] -> shipToId;
+                        }
+                    }
+                    MAP {
+                        drop n1Code;
+                    }
+                }
+            CASE "N3" :
+                MAP {
+                    mapSource {
+                        String[] elems;
+                    }
+                    mapTarget {
+                        String shipToStreet;
+                    }
+                    copy elems[1] -> shipToStreet;
+                }
+            CASE "N4" :
+                MAP {
+                    mapSource {
+                        String[] elems;
+                    }
+                    mapTarget {
+                        String shipToCity;
+                        String shipToState;
+                        String shipToPostalCode;
+                        String shipToCountryCode;
+                    }
+                    copy elems[1] -> shipToCity;
+                    copy elems[2] -> shipToState;
+                    copy elems[3] -> shipToPostalCode;
+                    copy elems[4] -> shipToCountryCode;
+                }
+            CASE "PO1" :
+                SEQUENCE {
+                    MAP {
+                        comment: "Hold this line's fields pending its PID (description), which follows immediately in the segment stream"
+                        mapSource {
+                            String[] elems;
+                        }
+                        mapTarget {
+                            String pendingLineNo;
+                            String pendingQuantity;
+                            String pendingUom;
+                            String pendingUnitPrice;
+                            String pendingItemCodeQualifier;
+                            String pendingItemCode;
+                        }
+                        copy elems[1] -> pendingLineNo;
+                        copy elems[2] -> pendingQuantity;
+                        copy elems[3] -> pendingUom;
+                        copy elems[4] -> pendingUnitPrice;
+                        copy elems[6] -> pendingItemCodeQualifier;
+                        copy elems[7] -> pendingItemCode;
+                    }
+                    INVOKE pub.math:multiplyFloats {
+                        comment: "Derive the line amount from quantity and unit price"
+                        input {
+                            mapSource {
+                                String pendingQuantity;
+                                String pendingUnitPrice;
+                            }
+                            mapTarget {
+                                String num1;
+                                String num2;
+                                String precision;
+                            }
+                            copy pendingQuantity -> num1;
+                            copy pendingUnitPrice -> num2;
+                            set precision = "2";
+                        }
+                        output {
+                            mapSource {
+                                String `value`;
+                            }
+                            mapTarget {
+                                String rawLineAmount;
+                            }
+                            copy `value` -> rawLineAmount;
+                            drop `value`;
+                        }
+                    }
+                    INVOKE pub.string:numericFormat {
+                        comment: "Force a fixed 2-decimal-place format -- multiplyFloats' precision rounding silently drops trailing zeros (e.g. 1000.0 instead of 1000.00)"
+                        input {
+                            mapSource {
+                                String rawLineAmount;
+                            }
+                            mapTarget {
+                                String num;
+                                String `pattern`;
+                            }
+                            copy rawLineAmount -> num;
+                            set `pattern` = "0.00";
+                        }
+                        output {
+                            mapSource {
+                                String `value`;
+                            }
+                            mapTarget {
+                                String pendingLineAmount;
+                            }
+                            copy `value` -> pendingLineAmount;
+                            drop `value`;
+                            drop rawLineAmount;
+                        }
+                    }
+                }
+            CASE "PID" :
+                SEQUENCE {
+                    MAP {
+                        comment: "Complete the pending line record with this description"
+                        mapSource {
+                            String[] elems;
+                            String pendingLineNo;
+                            String pendingItemCode;
+                            String pendingItemCodeQualifier;
+                            String pendingQuantity;
+                            String pendingUom;
+                            String pendingUnitPrice;
+                            String pendingLineAmount;
+                        }
+                        mapTarget {
+                            record currentLine {
+                                String lineNo;
+                                String itemCode;
+                                String itemCodeQualifier;
+                                String description;
+                                String quantity;
+                                String uom;
+                                String unitPrice;
+                                String lineAmount;
+                            };
+                        }
+                        copy elems[5] -> currentLine/description;
+                        copy pendingLineNo -> currentLine/lineNo;
+                        copy pendingItemCode -> currentLine/itemCode;
+                        copy pendingItemCodeQualifier -> currentLine/itemCodeQualifier;
+                        copy pendingQuantity -> currentLine/quantity;
+                        copy pendingUom -> currentLine/uom;
+                        copy pendingUnitPrice -> currentLine/unitPrice;
+                        copy pendingLineAmount -> currentLine/lineAmount;
+                    }
+                    INVOKE pub.list:appendToDocumentList {
+                        comment: "Append the completed line to the lines accumulator"
+                        input {
+                            mapSource {
+                                record currentLine {
+                                };
+                            }
+                            mapTarget {
+                                record fromItem {
+                                };
+                            }
+                            copy currentLine -> fromItem;
+                            drop currentLine;
+                            drop pendingLineNo;
+                            drop pendingItemCode;
+                            drop pendingItemCodeQualifier;
+                            drop pendingQuantity;
+                            drop pendingUom;
+                            drop pendingUnitPrice;
+                            drop pendingLineAmount;
+                        }
+                    }
+                }
+            CASE "CTT" :
+                MAP {
+                    mapSource {
+                        String[] elems;
+                    }
+                    mapTarget {
+                        String lineCount;
+                        String quantityHashTotal;
+                    }
+                    copy elems[1] -> lineCount;
+                    copy elems[2] -> quantityHashTotal;
+                }
+            CASE "AMT" :
+                MAP {
+                    mapSource {
+                        String[] elems;
+                    }
+                    mapTarget {
+                        String orderTotal;
+                    }
+                    copy elems[2] -> orderTotal;
+                }
+        }
+
+        MAP {
+            comment: "Clean up this iteration's transient segment-parsing variables"
+            drop segId;
+            drop elems;
+            drop trimmedSegment;
+        }
+    }
+
+    MAP {
+        comment: "Build the interchange record as its own standalone value"
+        mapSource {
+            String senderId;
+            String senderQualifier;
+            String receiverId;
+            String receiverQualifier;
+            String interchangeDate;
+            String interchangeTime;
+            String interchangeControlNo;
+            String controlVersion;
+            String ackRequested;
+            String usageIndicator;
+        }
+        mapTarget {
+            record interchangeDoc {
+                String senderId;
+                String senderQualifier;
+                String receiverId;
+                String receiverQualifier;
+                String interchangeDate;
+                String interchangeTime;
+                String interchangeControlNo;
+                String controlVersion;
+                String ackRequested;
+                String usageIndicator;
+            };
+        }
+        copy senderId -> interchangeDoc/senderId;
+        copy senderQualifier -> interchangeDoc/senderQualifier;
+        copy receiverId -> interchangeDoc/receiverId;
+        copy receiverQualifier -> interchangeDoc/receiverQualifier;
+        copy interchangeDate -> interchangeDoc/interchangeDate;
+        copy interchangeTime -> interchangeDoc/interchangeTime;
+        copy interchangeControlNo -> interchangeDoc/interchangeControlNo;
+        copy controlVersion -> interchangeDoc/controlVersion;
+        copy ackRequested -> interchangeDoc/ackRequested;
+        copy usageIndicator -> interchangeDoc/usageIndicator;
+    }
+
+    MAP {
+        comment: "Build the message record as its own standalone value"
+        mapSource {
+            String messageReference;
+            String messageType;
+            String functionalGroup;
+            String groupControlNo;
+            String gsVersion;
+            String gsAgency;
+        }
+        mapTarget {
+            record messageDoc {
+                String messageReference;
+                String messageType;
+                String functionalGroup;
+                String groupControlNo;
+                String version;
+                String agency;
+            };
+        }
+        copy messageReference -> messageDoc/messageReference;
+        copy messageType -> messageDoc/messageType;
+        copy functionalGroup -> messageDoc/functionalGroup;
+        copy groupControlNo -> messageDoc/groupControlNo;
+        copy gsVersion -> messageDoc/version;
+        copy gsAgency -> messageDoc/agency;
+    }
+
+    MAP {
+        comment: "Build the shipTo record as its own standalone value"
+        mapSource {
+            String shipToId;
+            String shipToQualifier;
+            String shipToName;
+            String shipToStreet;
+            String shipToCity;
+            String shipToState;
+            String shipToPostalCode;
+            String shipToCountryCode;
+        }
+        mapTarget {
+            record shipToDoc {
+                String id;
+                String qualifier;
+                String name;
+                String street;
+                String city;
+                String state;
+                String postalCode;
+                String countryCode;
+            };
+        }
+        copy shipToId -> shipToDoc/id;
+        copy shipToQualifier -> shipToDoc/qualifier;
+        copy shipToName -> shipToDoc/name;
+        copy shipToStreet -> shipToDoc/street;
+        copy shipToCity -> shipToDoc/city;
+        copy shipToState -> shipToDoc/state;
+        copy shipToPostalCode -> shipToDoc/postalCode;
+        copy shipToCountryCode -> shipToDoc/countryCode;
+    }
+
+    MAP {
+        comment: "Build the summary record as its own standalone value"
+        mapSource {
+            String lineCount;
+            String quantityHashTotal;
+            String orderTotal;
+        }
+        mapTarget {
+            record summaryDoc {
+                String lineCount;
+                String quantityHashTotal;
+                String orderTotal;
+            };
+        }
+        copy lineCount -> summaryDoc/lineCount;
+        copy quantityHashTotal -> summaryDoc/quantityHashTotal;
+        copy orderTotal -> summaryDoc/orderTotal;
+    }
+
+    MAP {
+        comment: "Build the payload record: scalar fields copied directly, shipTo/summary attached as whole pre-built values (reaching into a freshly-declared nested child's own sub-fields alongside scalar siblings in one MAP silently drops the nested ones -- confirmed the hard way)"
+        mapSource {
+            String purposeCode;
+            String orderTypeCode;
+            String poNumber;
+            String poDate;
+            String requestedDeliveryDate;
+            String currency;
+            String buyerId;
+            String buyerQualifier;
+            String buyerName;
+            String vendorId;
+            String vendorQualifier;
+            String vendorName;
+            record shipToDoc {
+            };
+            record summaryDoc {
+            };
+        }
+        mapTarget {
+            record payloadDoc {
+                String purposeCode;
+                String orderTypeCode;
+                String poNumber;
+                String poDate;
+                String requestedDeliveryDate;
+                String currency;
+                String buyerId;
+                String buyerQualifier;
+                String buyerName;
+                String vendorId;
+                String vendorQualifier;
+                String vendorName;
+                record shipTo {
+                };
+                record summary {
+                };
+            };
+        }
+        copy purposeCode -> payloadDoc/purposeCode;
+        copy orderTypeCode -> payloadDoc/orderTypeCode;
+        copy poNumber -> payloadDoc/poNumber;
+        copy poDate -> payloadDoc/poDate;
+        copy requestedDeliveryDate -> payloadDoc/requestedDeliveryDate;
+        copy currency -> payloadDoc/currency;
+        copy buyerId -> payloadDoc/buyerId;
+        copy buyerQualifier -> payloadDoc/buyerQualifier;
+        copy buyerName -> payloadDoc/buyerName;
+        copy vendorId -> payloadDoc/vendorId;
+        copy vendorQualifier -> payloadDoc/vendorQualifier;
+        copy vendorName -> payloadDoc/vendorName;
+        copy shipToDoc -> payloadDoc/shipTo;
+        copy summaryDoc -> payloadDoc/summary;
+        drop shipToDoc;
+        drop summaryDoc;
+    }
+
+    MAP {
+        comment: "Attach the line items to the already-built payload record in an isolated step (a recordList whole-value copy alongside other fields in the same MAP as the scalars/shipTo/summary above did not persist -- isolating it here does)"
+        mapSource {
+            recordList toList {
+            };
+        }
+        mapTarget {
+            record payloadDoc {
+                recordList lines {
+                };
+            };
+        }
+        copy toList -> payloadDoc/lines;
+        drop toList;
+    }
+
+    MAP {
+        comment: "Combine the three standalone records into the final output document in a single step"
+        mapSource {
+            record interchangeDoc {
+            };
+            record messageDoc {
+            };
+            record payloadDoc {
+            };
+        }
+        mapTarget {
+            record outputDoc {
+                record interchange {
+                };
+                record message {
+                };
+                record payload {
+                };
+            };
+        }
+        copy interchangeDoc -> outputDoc/interchange;
+        copy messageDoc -> outputDoc/message;
+        copy payloadDoc -> outputDoc/payload;
+        drop interchangeDoc;
+        drop messageDoc;
+        drop payloadDoc;
+    }
+
+    INVOKE pub.json:documentToJSONString {
+        comment: "Serialize the assembled document to a JSON string"
+        input {
+            mapSource {
+                record outputDoc {
+                };
+            }
+            mapTarget {
+                record `document` {
+                };
+                String prettyPrint;
+            }
+            copy outputDoc -> `document`;
+            set prettyPrint = "true";
+            drop outputDoc;
+        }
+        output {
+            mapSource {
+                String jsonString;
+            }
+            mapTarget {
+                String jsonOutput;
+            }
+            copy jsonString -> jsonOutput;
+            drop jsonString;
+        }
+    }
+}
